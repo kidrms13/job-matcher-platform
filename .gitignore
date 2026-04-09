@@ -1,0 +1,7 @@
+# Ignore uploaded resumes
+uploads/*
+!uploads/.gitkeep
+
+# Ignore Python cache files
+__pycache__/
+*.pyc

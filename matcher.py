@@ -28,15 +28,23 @@ def calculate_match(job_description, resume_text):
     return round(similarity_score * 100, 2)
 
 if __name__ == "__main__":
-    # We now look for TWO arguments: the file path AND the job requirements
+    # We now expect at least TWO arguments, but potentially THREE (the DB profile text)
     if len(sys.argv) > 2:
         pdf_file_path = sys.argv[1]
         job_reqs = sys.argv[2] 
         
+        # Capture the database text if PHP sent it, otherwise default to empty string
+        db_profile_text = sys.argv[3] if len(sys.argv) > 3 else ""
+        
+        # 1. Read the PDF
         resume_text = extract_text_from_pdf(pdf_file_path)
         
-        if resume_text.strip():
-            score = calculate_match(job_reqs, resume_text)
+        # 2. Combine the PDF text AND the Database text into one massive Context Block
+        total_applicant_context = resume_text + " " + db_profile_text
+        
+        # 3. Calculate the match based on the combined data
+        if total_applicant_context.strip():
+            score = calculate_match(job_reqs, total_applicant_context)
             print(score)
         else:
             print("0.00")

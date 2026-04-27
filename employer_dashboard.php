@@ -25,22 +25,36 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['post_job'])) {
     }
 }
 
-// Handle Scanning for a Specific Job
+// Handle Scanning for a Specific Job (THE ADVANCED ENGINE)
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['scan_job'])) {
     $job_reqs = $_POST['job_requirements'];
     $active_scan_title = $_POST['job_title'];
     
-    $result = $conn->query("SELECT name, resume_path FROM users WHERE role = 'applicant' AND resume_path IS NOT NULL");
+    // ADVANCED QUERY: Grabs Resume + Bio + Skills + Education + Certs + Experience!
+    $sql = "
+        SELECT u.id, u.name, u.resume_path, u.bio, u.skills, u.education, u.certifications,
+               GROUP_CONCAT(CONCAT(e.job_title, ' at ', e.company, ' ', e.description) SEPARATOR ' ') as exp_text
+        FROM users u
+        LEFT JOIN experience e ON u.id = e.user_id
+        WHERE u.role = 'applicant' AND u.resume_path IS NOT NULL
+        GROUP BY u.id
+    ";
+    $result = $conn->query($sql);
     
     while ($applicant = $result->fetch_assoc()) {
         $pdf_path = $applicant['resume_path'];
-        $command = '"C:\\Program Files\\Python314\\python.exe" matcher.py ' . escapeshellarg($pdf_path) . ' ' . escapeshellarg($job_reqs) . ' 2>&1';
+        
+        // Combine ALL their data into one massive block for Python to read
+        $profile_text = $applicant['skills'] . " " . $applicant['bio'] . " " . $applicant['education'] . " " . $applicant['certifications'] . " " . $applicant['exp_text'];
+        
+        $command = '"C:\\Program Files\\Python314\\python.exe" matcher.py ' . escapeshellarg($pdf_path) . ' ' . escapeshellarg($job_reqs) . ' ' . escapeshellarg($profile_text) . ' 2>&1';
         $output = shell_exec($command);
         
         if (is_numeric(trim($output))) {
             $score = floatval(trim($output));
             if ($score > 0) { // Only show matches above 0%
                 $ranked_applicants[] = [
+                    'id' => $applicant['id'],
                     'name' => $applicant['name'],
                     'resume' => $applicant['resume_path'],
                     'score' => $score
@@ -92,7 +106,10 @@ $my_jobs = $conn->query("SELECT * FROM jobs WHERE employer_id = $employer_id ORD
 
 <div class="navbar">
     <h2>Job Matcher <span style="color:#666; font-size:16px;">| Employer Hub</span></h2>
-    <a href="logout.php" class="logout-btn">Log Out</a>
+    <div style="display: flex; gap: 15px;">
+        <a href="profile.php" style="color: #0a66c2; font-weight: bold; text-decoration: none; align-self: center;">My Profile</a>
+        <a href="logout.php" class="logout-btn">Log Out</a>
+    </div>
 </div>
 
 <div class="main-layout">
@@ -107,8 +124,8 @@ $my_jobs = $conn->query("SELECT * FROM jobs WHERE employer_id = $employer_id ORD
                 <label>Company Name:</label>
                 <input type="text" name="company" required placeholder="Your Company">
                 
-                <label>Skills & Requirements:</label>
-                <textarea name="requirements" rows="5" required placeholder="List the skills the applicant must have..."></textarea>
+                <label>Skills & Requirements (Including Education/Certs):</label>
+                <textarea name="requirements" rows="5" required placeholder="e.g. Bachelor's in CS, AWS Certified, 3 years Python..."></textarea>
                 
                 <button type="submit" name="post_job">Publish to Job Board</button>
             </form>
@@ -126,7 +143,9 @@ $my_jobs = $conn->query("SELECT * FROM jobs WHERE employer_id = $employer_id ORD
                     <?php foreach ($ranked_applicants as $app): ?>
                         <div class="applicant-card">
                             <div>
-                                <h4 style="margin: 0; color: #333; font-size: 18px;"><?php echo htmlspecialchars($app['name']); ?></h4>
+                                <h4 style="margin: 0; color: #333; font-size: 18px;">
+                                    <a href="profile.php?id=<?php echo $app['id']; ?>" style="text-decoration: none; color: #0a66c2;"><?php echo htmlspecialchars($app['name']); ?></a>
+                                </h4>
                                 <a href="<?php echo htmlspecialchars($app['resume']); ?>" target="_blank" class="view-resume-btn" style="display: inline-block; margin-top: 8px;">📄 View Resume PDF</a>
                             </div>
                             <div class="score-badge">
@@ -148,6 +167,8 @@ $my_jobs = $conn->query("SELECT * FROM jobs WHERE employer_id = $employer_id ORD
                         <div>
                             <h4 style="margin: 0; color: #333; font-size: 18px;"><?php echo htmlspecialchars($job['title']); ?></h4>
                             <p style="margin: 5px 0 0 0; color: #666; font-size: 14px;">Posted: <?php echo date('M d, Y', strtotime($job['created_at'])); ?></p>
+                            
+                            <a href="edit_job.php?id=<?php echo $job['id']; ?>" style="font-size: 13px; color: #0a66c2; text-decoration: none; font-weight: bold; display: inline-block; margin-top: 5px;">✏️ Edit Job</a>
                         </div>
                         <form method="POST" style="margin: 0;">
                             <input type="hidden" name="job_title" value="<?php echo htmlspecialchars($job['title']); ?>">

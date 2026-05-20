@@ -1,52 +1,78 @@
-import sys
+import os
+import json
+import warnings
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# Suppress background logs and warnings
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+warnings.filterwarnings("ignore")
+
 import PyPDF2
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer, util
+
+print("Loading Semantic AI brain (all-MiniLM-L6-v2)...")
+model = SentenceTransformer('all-MiniLM-L6-v2')
+print("AI Brain loaded successfully! Server is ready.")
 
 def extract_text_from_pdf(file_path):
     text = ""
     try:
+        if file_path == "NO_RESUME" or not os.path.exists(file_path):
+            return ""
         with open(file_path, 'rb') as file:
             reader = PyPDF2.PdfReader(file)
             for page in reader.pages:
-                if page.extract_text():
-                    text += page.extract_text() + " "
-        return text
-    except Exception as e:
+                extracted = page.extract_text()
+                if extracted:
+                    text += extracted + " "
+    except Exception:
         return ""
+    return text
 
-def calculate_match(job_description, resume_text):
-    if not job_description or not resume_text:
-        return 0.0
+class AIServerHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        # Read incoming data from PHP
+        content_length = int(self.headers['Content-Length'])
+        post_data = self.rfile.read(content_length)
+        data = json.loads(post_data.decode('utf-8'))
+        
+        job_reqs = data.get('job_requirements', '')
+        applicants = data.get('applicants', [])
+        
+        # Calculate AI Embeddings
+        job_embedding = model.encode(job_reqs, convert_to_tensor=True)
+        results = []
+        
+        for app in applicants:
+            resume_text = extract_text_from_pdf(app.get('resume_path', 'NO_RESUME'))
+            total_context = resume_text + " " + app.get('db_text', '')
+            
+            if total_context.strip():
+                app_embedding = model.encode(total_context, convert_to_tensor=True)
+                cosine_scores = util.cos_sim(job_embedding, app_embedding)
+                score = cosine_scores[0][0].item() * 100
+            else:
+                score = 0.0
+                
+            results.append({
+                "id": str(app.get('id')),
+                "score": round(score, 2)
+            })
+            
+        # Send clean JSON response back to PHP
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(results).encode('utf-8'))
 
-    documents = [job_description, resume_text]
-    vectorizer = TfidfVectorizer(stop_words='english')
-    
-    tfidf_matrix = vectorizer.fit_transform(documents)
-    similarity_score = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
-    
-    return round(similarity_score * 100, 2)
+    def log_message(self, format, *args):
+        return # Keep console quiet
 
 if __name__ == "__main__":
-    # We now expect at least TWO arguments, but potentially THREE (the DB profile text)
-    if len(sys.argv) > 2:
-        pdf_file_path = sys.argv[1]
-        job_reqs = sys.argv[2] 
-        
-        # Capture the database text if PHP sent it, otherwise default to empty string
-        db_profile_text = sys.argv[3] if len(sys.argv) > 3 else ""
-        
-        # 1. Read the PDF
-        resume_text = extract_text_from_pdf(pdf_file_path)
-        
-        # 2. Combine the PDF text AND the Database text into one massive Context Block
-        total_applicant_context = resume_text + " " + db_profile_text
-        
-        # 3. Calculate the match based on the combined data
-        if total_applicant_context.strip():
-            score = calculate_match(job_reqs, total_applicant_context)
-            print(score)
-        else:
-            print("0.00")
-    else:
-        print("Error: Missing arguments")
+    # Start the local background service on port 5000
+    server = HTTPServer(('127.0.0.1', 5000), AIServerHandler)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down AI Server.")

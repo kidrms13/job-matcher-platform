@@ -11,6 +11,7 @@ if (!isset($_SESSION['user_id']) || $_SESSION['role'] != 'employer') {
 $employer_id = $_SESSION['user_id'];
 $message = "";
 $ranked_applicants = [];
+$unmatched_applicants = []; 
 $active_scan_title = "";
 
 // Handle Posting a New Job
@@ -25,45 +26,91 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['post_job'])) {
     }
 }
 
-// Handle Scanning for a Specific Job (THE ADVANCED ENGINE)
+// Handle Scanning for a Specific Job (API PROCESSED SEMANTIC AI)
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['scan_job'])) {
     $job_reqs = $_POST['job_requirements'];
     $active_scan_title = $_POST['job_title'];
     
-    // ADVANCED QUERY: Grabs Resume + Bio + Skills + Education + Certs + Experience!
+    $applicants_data = [];
+    $applicant_details = []; 
+    
     $sql = "
-        SELECT u.id, u.name, u.resume_path, u.bio, u.skills, u.education, u.certifications,
-               GROUP_CONCAT(CONCAT(e.job_title, ' at ', e.company, ' ', e.description) SEPARATOR ' ') as exp_text
+        SELECT u.id, u.name, u.resume_path, 
+               IFNULL(u.bio, '') as bio, 
+               IFNULL(u.skills, '') as skills, 
+               IFNULL(u.education, '') as education, 
+               IFNULL(u.certifications, '') as certifications,
+               GROUP_CONCAT(CONCAT(e.job_title, ' at ', e.company, ' ', IFNULL(e.description, '')) SEPARATOR ' ') as exp_text
         FROM users u
         LEFT JOIN experience e ON u.id = e.user_id
-        WHERE u.role = 'applicant' AND u.resume_path IS NOT NULL
+        WHERE u.role = 'applicant'
         GROUP BY u.id
     ";
     $result = $conn->query($sql);
     
     while ($applicant = $result->fetch_assoc()) {
-        $pdf_path = $applicant['resume_path'];
-        
-        // Combine ALL their data into one massive block for Python to read
+        $pdf_path = !empty($applicant['resume_path']) ? $applicant['resume_path'] : "NO_RESUME";
         $profile_text = $applicant['skills'] . " " . $applicant['bio'] . " " . $applicant['education'] . " " . $applicant['certifications'] . " " . $applicant['exp_text'];
         
-        $command = '"C:\\Program Files\\Python314\\python.exe" matcher.py ' . escapeshellarg($pdf_path) . ' ' . escapeshellarg($job_reqs) . ' ' . escapeshellarg($profile_text) . ' 2>&1';
-        $output = shell_exec($command);
+        $applicants_data[] = [
+            'id' => $applicant['id'],
+            'resume_path' => $pdf_path,
+            'db_text' => $profile_text
+        ];
         
-        if (is_numeric(trim($output))) {
-            $score = floatval(trim($output));
-            if ($score > 0) { // Only show matches above 0%
-                $ranked_applicants[] = [
-                    'id' => $applicant['id'],
-                    'name' => $applicant['name'],
-                    'resume' => $applicant['resume_path'],
+        $applicant_details[$applicant['id']] = [
+            'name' => $applicant['name'],
+            'resume' => $applicant['resume_path']
+        ];
+    }
+    
+    if (count($applicants_data) > 0) {
+        // Bundle requirements and applicant structures for delivery
+        $payload = json_encode([
+            'job_requirements' => $job_reqs,
+            'applicants' => $applicants_data
+        ]);
+        
+        // Use clean network stream communication (Bypasses Windows command routing permissions)
+        $ch = curl_init('http://127.0.0.1:5000/');
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+        $response = curl_exec($ch);
+        curl_close($ch);
+        
+        $scores = json_decode($response, true);
+        
+        if (is_array($scores)) {
+            foreach ($scores as $score_data) {
+                $id = $score_data['id'];
+                $score = floatval($score_data['score']);
+                $details = $applicant_details[$id];
+                
+                $app_array = [
+                    'id' => $id,
+                    'name' => $details['name'],
+                    'resume' => $details['resume'],
                     'score' => $score
                 ];
+
+                if ($score > 0) {
+                    $ranked_applicants[] = $app_array;
+                } else {
+                    $unmatched_applicants[] = $app_array;
+                }
             }
+        } else {
+             $message = "<div class='success' style='background: #fff3cd; color: #856404; border-color: #ffeeba;'>
+                            <strong>AI Connection Notice:</strong> Background processing server unreachable. Ensure <code>python matcher.py</code> is actively running in your terminal window.
+                         </div>";
         }
+        
+        usort($ranked_applicants, function($a, $b) { return $b['score'] <=> $a['score']; });
+        usort($unmatched_applicants, function($a, $b) { return strcmp($a['name'], $b['name']); });
     }
-    // Sort from highest to lowest
-    usort($ranked_applicants, function($a, $b) { return $b['score'] <=> $a['score']; });
 }
 
 // Fetch all jobs posted by this employer
@@ -73,6 +120,7 @@ $my_jobs = $conn->query("SELECT * FROM jobs WHERE employer_id = $employer_id ORD
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <meta charset="UTF-8">
     <title>Employer Hub - Job Matcher</title>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f2ee; margin: 0; color: #333; }
@@ -95,8 +143,9 @@ $my_jobs = $conn->query("SELECT * FROM jobs WHERE employer_id = $employer_id ORD
         .btn-scan:hover { background-color: #03522e; }
         
         .job-item { border: 1px solid #e0e0e0; padding: 15px; border-radius: 8px; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; background: #fafafa;}
-        .applicant-card { display: flex; justify-content: space-between; align-items: center; border: 1px solid #e0e0e0; padding: 15px; border-radius: 8px; margin-bottom: 10px; }
+        .applicant-card { display: flex; justify-content: space-between; align-items: center; border: 1px solid #e0e0e0; padding: 15px; border-radius: 8px; margin-bottom: 10px; background: #fff;}
         .score-badge { background: #d4edda; color: #155724; padding: 10px 15px; border-radius: 20px; font-weight: bold; font-size: 18px; }
+        .score-badge-zero { background: #f8d7da; color: #721c24; padding: 10px 15px; border-radius: 20px; font-weight: bold; font-size: 16px; }
         .view-resume-btn { background: white; color: #0a66c2; border: 1px solid #0a66c2; padding: 5px 15px; border-radius: 15px; text-decoration: none; font-size: 14px; font-weight: bold;}
         .view-resume-btn:hover { background: #f4f2ee; }
         .success { color: green; background: #e6f4ea; padding: 10px; border-radius: 5px; margin-bottom: 15px; border: 1px solid #c3e6cb;}
@@ -146,7 +195,11 @@ $my_jobs = $conn->query("SELECT * FROM jobs WHERE employer_id = $employer_id ORD
                                 <h4 style="margin: 0; color: #333; font-size: 18px;">
                                     <a href="profile.php?id=<?php echo $app['id']; ?>" style="text-decoration: none; color: #0a66c2;"><?php echo htmlspecialchars($app['name']); ?></a>
                                 </h4>
-                                <a href="<?php echo htmlspecialchars($app['resume']); ?>" target="_blank" class="view-resume-btn" style="display: inline-block; margin-top: 8px;">📄 View Resume PDF</a>
+                                <?php if ($app['resume']): ?>
+                                    <a href="<?php echo htmlspecialchars($app['resume']); ?>" target="_blank" class="view-resume-btn" style="display: inline-block; margin-top: 8px;">📄 View Resume PDF</a>
+                                <?php else: ?>
+                                    <span style="font-size: 12px; color: #999; display: inline-block; margin-top: 8px;">No PDF uploaded</span>
+                                <?php endif; ?>
                             </div>
                             <div class="score-badge">
                                 <?php echo $app['score']; ?>% Match
@@ -154,8 +207,30 @@ $my_jobs = $conn->query("SELECT * FROM jobs WHERE employer_id = $employer_id ORD
                         </div>
                     <?php endforeach; ?>
                 <?php else: ?>
-                    <p style="color: #666;">No applicants currently match these requirements.</p>
+                    <p style="color: #666; padding: 10px; background: #f9f9f9; border-radius: 5px;">No strong matches found based on your requirements.</p>
                 <?php endif; ?>
+
+                <h3 style="margin-top: 40px; color: #d9534f; border-bottom: 2px solid #fdf2f2; padding-bottom: 10px;">Applicants that are not a match</h3>
+                <?php if (count($unmatched_applicants) > 0): ?>
+                    <?php foreach ($unmatched_applicants as $app): ?>
+                        <div class="applicant-card" style="opacity: 0.8; background: #fafafa;">
+                            <div>
+                                <h4 style="margin: 0; color: #666; font-size: 16px;">
+                                    <a href="profile.php?id=<?php echo $app['id']; ?>" style="text-decoration: none; color: #666;"><?php echo htmlspecialchars($app['name']); ?></a>
+                                </h4>
+                                <?php if ($app['resume']): ?>
+                                    <a href="<?php echo htmlspecialchars($app['resume']); ?>" target="_blank" style="font-size: 12px; color: #0a66c2; text-decoration: none; display: inline-block; margin-top: 5px;">View Resume</a>
+                                <?php endif; ?>
+                            </div>
+                            <div class="score-badge-zero">
+                                0% Match
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                <?php else: ?>
+                    <p style="color: #666;">There are no unmatched applicants in the database.</p>
+                <?php endif; ?>
+
             </div>
         <?php endif; ?>
 
